@@ -99,41 +99,22 @@ jobs:
             exit 1
           fi
 
-      - name: Select authentication method
-        id: auth_method
+      - name: Validate WIF secrets
         env:
-          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
-          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER || secrets.WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT || secrets.GCP_SA_EMAIL }}
         run: |
-          if [[ -n "$GCP_WIF_PROVIDER" && -n "$GCP_SERVICE_ACCOUNT" ]]; then
-            echo "method=wif" >> "$GITHUB_OUTPUT"
-          elif [[ -n "$GCP_SA_KEY" ]]; then
-            echo "method=sa_key" >> "$GITHUB_OUTPUT"
-          else
-            echo "method=none" >> "$GITHUB_OUTPUT"
+          if [[ -z "$GCP_WIF_PROVIDER" || -z "$GCP_SERVICE_ACCOUNT" ]]; then
+            echo "::error::Missing WIF secrets. Set GCP_WIF_PROVIDER (or WIF_PROVIDER) and GCP_SERVICE_ACCOUNT (or GCP_SA_EMAIL)."
+            exit 1
           fi
 
-      - name: Authenticate to Google Cloud (WIF)
-        if: ${{ steps.auth_method.outputs.method == 'wif' }}
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER || secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || secrets.GCP_SA_EMAIL }}
           project_id: ${{ env.PROJECT_ID }}
-
-      - name: Authenticate to Google Cloud (Service Account Key)
-        if: ${{ steps.auth_method.outputs.method == 'sa_key' }}
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ env.PROJECT_ID }}
-
-      - name: Fail if GCP credentials are missing
-        if: ${{ steps.auth_method.outputs.method == 'none' }}
-        run: |
-          echo "::error::No GCP auth credentials found. Configure WIF (GCP_WIF_PROVIDER + GCP_SERVICE_ACCOUNT) or GCP_SA_KEY."
-          exit 1
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
@@ -213,41 +194,22 @@ jobs:
             exit 1
           fi
 
-      - name: Select authentication method
-        id: auth_method
+      - name: Validate WIF secrets
         env:
-          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
-          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER || secrets.WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT || secrets.GCP_SA_EMAIL }}
         run: |
-          if [[ -n "$GCP_WIF_PROVIDER" && -n "$GCP_SERVICE_ACCOUNT" ]]; then
-            echo "method=wif" >> "$GITHUB_OUTPUT"
-          elif [[ -n "$GCP_SA_KEY" ]]; then
-            echo "method=sa_key" >> "$GITHUB_OUTPUT"
-          else
-            echo "method=none" >> "$GITHUB_OUTPUT"
+          if [[ -z "$GCP_WIF_PROVIDER" || -z "$GCP_SERVICE_ACCOUNT" ]]; then
+            echo "::error::Missing WIF secrets. Set GCP_WIF_PROVIDER (or WIF_PROVIDER) and GCP_SERVICE_ACCOUNT (or GCP_SA_EMAIL)."
+            exit 1
           fi
 
-      - name: Authenticate to Google Cloud (WIF)
-        if: ${{ steps.auth_method.outputs.method == 'wif' }}
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER || secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT || secrets.GCP_SA_EMAIL }}
           project_id: ${{ env.PROJECT_ID }}
-
-      - name: Authenticate to Google Cloud (Service Account Key)
-        if: ${{ steps.auth_method.outputs.method == 'sa_key' }}
-        uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-          project_id: ${{ env.PROJECT_ID }}
-
-      - name: Fail if GCP credentials are missing
-        if: ${{ steps.auth_method.outputs.method == 'none' }}
-        run: |
-          echo "::error::No GCP auth credentials found. Configure WIF (GCP_WIF_PROVIDER + GCP_SERVICE_ACCOUNT) or GCP_SA_KEY."
-          exit 1
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2

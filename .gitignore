@@ -4,3 +4,5 @@
 letsencrypt/
 var/log/
 configs/wireguard/private.key
+__pycache__/
+*.pyc
