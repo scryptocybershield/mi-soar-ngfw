@@ -1,0 +1,206 @@
+%YAML 1.1
+---
+# MI-SOAR-NGFW Suricata Configuration
+# IDS/IPS with nftables integration
+
+# Run mode
+run-as:
+  user: suricata
+  group: suricata
+
+# Logging
+logging:
+  # Default log level
+  default-log-level: info
+
+  # Log outputs
+  outputs:
+    - console:
+        enabled: yes
+    - file:
+        enabled: yes
+        filename: /var/log/suricata/suricata.log
+        append: yes
+        level: info
+    - stats:
+        enabled: yes
+        filename: /var/log/suricata/stats.log
+        append: yes
+        interval: 300  # 5 minutes
+
+# Default packet processing settings
+defrag:
+  memcap: 64mb
+  hash-size: 65536
+  trackers: 65535
+  max-frags: 65535
+  prealloc: yes
+
+flow:
+  memcap: 128mb
+  hash-size: 65536
+  prealloc: 10000
+  emergency-recovery: 30
+
+# IPS mode with nftables support
+nfq:
+  mode: accept
+  repeat-mark: 1
+  repeat-mask: 1
+  fail-open: yes
+
+# Network interface
+af-packet:
+  - interface: eth0
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    use-mmap: yes
+    threads: auto
+    tpacket-v3: yes
+    ring-size: 2048
+    block-size: 32768
+
+# nftables IPS integration
+nflog:
+  - group: 2
+    buffer-size: 18432
+    threshold: 1
+
+# Rule management
+rule-files:
+  - suricata.rules
+
+classification-file: /etc/suricata/classification.config
+reference-config-file: /etc/suricata/reference.config
+
+# Performance tuning
+max-pending-packets: 1024
+detect-engine:
+  - profile: medium
+  - custom-values:
+      toclient-src-groups: 2
+      toclient-dst-groups: 2
+      toclient-sp-groups: 2
+      toclient-dp-groups: 3
+      toserver-src-groups: 2
+      toserver-dst-groups: 4
+      toserver-sp-groups: 2
+      toserver-dp-groups: 25
+
+# Outputs for alerts
+outputs:
+  # Alert fast output
+  - alert-fast:
+      enabled: yes
+      filename: /var/log/suricata/fast.log
+
+  # JSON alert output for SIEM integration
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: /var/log/suricata/eve.json
+      types:
+        - alert:
+            payload: yes
+            payload-printable: yes
+            packet: yes
+            http: yes
+            tls: yes
+            ssh: yes
+            smtp: yes
+        - dns
+        - http
+        - files
+        - smtp
+        - tls
+        - ssh
+      community-id: yes
+
+  # Unified2 output for Barnyard2
+  - unified2-alert:
+      enabled: no
+      filename: unified2.alert
+      limit: 32mb
+
+  # Stats logging
+  - stats:
+      enabled: yes
+      filename: /var/log/suricata/stats.log
+      interval: 300
+
+  # Syslog output
+  - syslog:
+      enabled: no
+      facility: local5
+      level: info
+
+# Host information
+host-mode: auto
+host-os-policy:
+  windows: [0.0.0.0/0]
+  bsd: []
+  bsd-right: []
+  old-linux: []
+  linux: [10.0.0.0/8, 192.168.0.0/16]
+  old-solaris: []
+  solaris: []
+  hpux10: []
+  hpux11: []
+  irix: []
+  macos: []
+  vista: []
+  android: []
+
+# Thresholding
+detection:
+  - custom-values:
+      toclient-src-groups: 2
+      toclient-dst-groups: 2
+      toclient-sp-groups: 2
+      toclient-dp-groups: 3
+      toserver-src-groups: 2
+      toserver-dst-groups: 4
+      toserver-sp-groups: 2
+      toserver-dp-groups: 25
+
+# Pattern matcher
+mpm-algo: ac
+
+# Streaming
+stream:
+  memcap: 64mb
+  checksum-validation: no
+  inline: auto
+  reassembly:
+    memcap: 256mb
+    depth: 1mb
+    toserver-chunk-size: 2560
+    toclient-chunk-size: 2560
+
+# App layer protocol parsers
+app-layer:
+  protocols:
+    tls:
+      enabled: yes
+      detection-ports:
+        dp: 443
+    http:
+      enabled: yes
+    ssh:
+      enabled: yes
+    smtp:
+      enabled: yes
+    dns:
+      enabled: yes
+      udp:
+        ports: [53]
+      tcp:
+        ports: [53]
+
+# Performance profiling
+profiling:
+  rules:
+    enabled: no
+    filename: rule_perf.log
+    append: yes

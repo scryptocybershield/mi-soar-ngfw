@@ -1,0 +1,93 @@
+{
+  "database": {
+    "type": "postgres",
+    "postgresdb": {
+      "host": "localhost",
+      "port": 5432,
+      "user": "n8n",
+      "password": "n8n",
+      "database": "n8n"
+    }
+  },
+  "executions": {
+    "saveDataOnSuccess": "all",
+    "saveDataOnError": "all",
+    "saveExecutionProgress": false,
+    "pruneData": true,
+    "pruneDataMaxAge": 168,
+    "pruneDataTimeout": 3600
+  },
+  "generic": {
+    "timezone": "UTC",
+    "instanceId": "mi-soar-ngfw",
+    "security": {
+      "excludeEndpoints": "healthz,metrics",
+      "basicAuth": {
+        "user": "admin",
+        "password": "changeme"
+      }
+    }
+  },
+  "endpoints": {
+    "rest": "localhost",
+    "webhook": "localhost",
+    "webhookTest": "localhost"
+  },
+  "externalHookFiles": {
+    "suricata": "/etc/mi-soar-ngfw/configs/n8n/custom-nodes/suricata.js",
+    "wazuh": "/etc/mi-soar-ngfw/configs/n8n/custom-nodes/wazuh.js",
+    "nftables": "/etc/mi-soar-ngfw/configs/n8n/custom-nodes/nftables.js",
+    "wireguard": "/etc/mi-soar-ngfw/configs/n8n/custom-nodes/wireguard.js"
+  },
+  "logs": {
+    "level": "info",
+    "output": "console",
+    "file": {
+      "location": "/home/node/.n8n/logs/n8n.log",
+      "fileCountMax": 5,
+      "fileSizeMax": 16777216
+    }
+  },
+  "nodes": {
+    "exclude": [],
+    "include": []
+  },
+  "credentials": {
+    "overwrite": {
+      "data": {}
+    }
+  },
+  "queue": {
+    "healthCheckActive": true,
+    "healthCheckInterval": 30000
+  },
+  "license": {
+    "activate": false
+  },
+  "versionNotifications": {
+    "enabled": false
+  },
+  "binaryDataManager": {
+    "availableModes": "filesystem",
+    "mode": "filesystem",
+    "localStoragePath": "/home/node/.n8n/data"
+  },
+  "workflows": {
+    "defaultName": "My workflow"
+  },
+  "externalSecrets": {
+    "enable": false
+  },
+  "deployment": {
+    "type": "default"
+  },
+  "userManagement": {
+    "isEnabled": true,
+    "smtp": {
+      "host": "localhost",
+      "port": 25,
+      "secure": false,
+      "ignoreTLS": false
+    }
+  }
+}

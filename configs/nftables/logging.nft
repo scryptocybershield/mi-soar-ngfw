@@ -1,0 +1,36 @@
+# nftables logging configuration
+
+table inet filter {
+    # Log chain for detailed packet logging
+    chain log_input {
+        # Log TCP packets
+        tcp flags syn tcp dport != 22 log prefix "TCP-SYN: " group 0 accept
+        tcp flags fin tcp dport != 22 log prefix "TCP-FIN: " group 0 accept
+        tcp flags rst log prefix "TCP-RST: " group 0 accept
+
+        # Log large UDP packets
+        udp length > 1024 log prefix "Large-UDP: " group 0 accept
+
+        # Log ICMP
+        ip protocol icmp log prefix "ICMP: " group 0 accept
+        ip6 nexthdr ipv6-icmp log prefix "ICMPv6: " group 0 accept
+
+        # Default accept
+        accept
+    }
+
+    # Rate-limited logging chain
+    chain log_ratelimit {
+        # Limit logs to 10 per minute per source IP
+        ip saddr @ratelimit_set log prefix "Ratelimited: " group 0 accept
+        add @ratelimit_set { ip saddr }
+    }
+
+    # Set for rate limiting
+    set ratelimit_set {
+        type ipv4_addr
+        size 65536
+        flags dynamic, timeout
+        timeout 60s
+    }
+}

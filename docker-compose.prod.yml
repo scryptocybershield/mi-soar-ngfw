@@ -1,0 +1,196 @@
+# MI-SOAR-NGFW Production Overrides
+# For GCP Cloud Run / GCE / OVH production environments
+
+version: '3.8'
+
+x-common-prod: &common-prod
+  restart: always
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "10"
+      tag: "{{.Name}}"
+
+services:
+  # Suricata - production tuning
+  suricata:
+    <<: *common-prod
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+      - SYS_NICE
+    # Performance tuning
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    environment:
+      SURICATA_IFACE: eth0
+      THREADS: auto
+      AF_PACKET_MEMORY: 2048mb
+
+  # WireGuard - production security
+  wireguard:
+    <<: *common-prod
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.core.rmem_max=134217728
+      - net.core.wmem_max=134217728
+    volumes:
+      - /etc/wireguard:/config:ro
+      - /lib/modules:/lib/modules:ro
+    environment:
+      PEERS: ${WG_PEERS:-50}
+      PEERDNS: 1.1.1.1,1.0.0.1
+      INTERNAL_SUBNET: ${WG_SERVER_ADDRESS:-10.10.1.1/24}
+      ALLOWEDIPS: ${WG_ALLOWED_IPS:-0.0.0.0/0}
+    ports:
+      - "51820:51820/udp"
+
+  # nftables - production rules
+  nftables:
+    <<: *common-prod
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - /etc/nftables:/etc/nftables:ro
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      nft --check -f /etc/nftables/main.nft &&
+      nft -f /etc/nftables/main.nft &&
+      echo 'Production nftables rules loaded' &&
+      # Monitor for rule updates
+      inotifywait -m /etc/nftables -e modify |
+      while read; do
+        echo 'Reloading nftables rules' &&
+        nft -f /etc/nftables/main.nft
+      done
+      "
+
+  # Wazuh - production configuration
+  wazuh:
+    <<: *common-prod
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.10
+    environment:
+      WAZUH_API_USER: ${WAZUH_API_USER}
+      WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD}
+      WAZUH_CLUSTER_DISABLED: yes
+      WAZUH_REGISTRATION_SERVER: 0.0.0.0
+    volumes:
+      - /etc/wazuh:/var/ossec/etc:ro
+      - wazuh-data:/var/ossec/data
+      - wazuh-logs:/var/ossec/logs
+    ports:
+      - "55000:55000"
+      - "1514:1514"
+      - "1515:1515"
+      - "514:514/udp"
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+  # n8n - production configuration
+  n8n:
+    <<: *common-prod
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.20
+    environment:
+      N8N_PROTOCOL: https
+      N8N_HOST: ${N8N_HOST}
+      N8N_PORT: 5678
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL}
+      N8N_METRICS: "true"
+      N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN: "true"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "24"
+      N8N_USER_MANAGEMENT_DISABLED: "false"
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - n8n-logs:/home/node/.n8n/logs
+    ports:
+      - "5678:5678"
+
+  # Traefik - production with SSL
+  traefik:
+    <<: *common-prod
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.30
+    command:
+      - "--api.dashboard=false"
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${TRAEFIK_ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/etc/traefik/acme.json"
+      - "--log.level=${LOG_LEVEL:-info}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /etc/traefik:/etc/traefik:ro
+      - traefik-acme:/etc/traefik/acme.json
+    ports:
+      - "80:80"
+      - "443:443"
+
+# Production volumes
+volumes:
+  wazuh-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/wazuh/data
+  wazuh-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/wazuh/logs
+  n8n-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/n8n/data
+  n8n-logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/n8n/logs
+  traefik-acme:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/traefik/acme

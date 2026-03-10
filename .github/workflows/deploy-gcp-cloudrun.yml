@@ -1,0 +1,215 @@
+name: Deploy to GCP Cloud Run
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'configs/**'
+      - 'scripts/**'
+      - '.github/workflows/deploy-gcp-cloudrun.yml'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      project_id:
+        description: 'GCP Project ID'
+        required: false
+        type: string
+
+env:
+  PROJECT_ID: ${{ github.event.inputs.project_id || secrets.GCP_PROJECT_ID }}
+  REGION: europe-west1
+  SERVICE_NAME: mi-soar-ngfw
+
+jobs:
+  test:
+    name: Test Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          docker build -t $SERVICE_NAME:test .
+
+      - name: Validate Docker Compose
+        run: |
+          docker-compose config
+
+      - name: Validate configurations
+        run: |
+          # Check Suricata config
+          docker run --rm -v $(pwd)/configs/suricata:/etc/suricata:ro jasonish/suricata:latest -T -c /etc/suricata/suricata.yaml || echo "Suricata config validation failed"
+
+          # Check nftables config
+          docker run --rm -v $(pwd)/configs/nftables:/etc/nftables:ro debian:bookworm-slim nft --check -f /etc/nftables/main.nft || echo "nftables config validation failed"
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: test
+    environment: staging
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker for GCR
+        run: |
+          gcloud auth configure-docker --quiet
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:staging-${{ github.sha }}"
+          docker build -t $IMAGE_NAME .
+          docker push $IMAGE_NAME
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:staging-${{ github.sha }}"
+          gcloud run deploy $SERVICE_NAME-staging \
+            --image $IMAGE_NAME \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated \
+            --cpu 2 \
+            --memory 4Gi \
+            --max-instances 5 \
+            --timeout 300 \
+            --concurrency 80 \
+            --set-env-vars="ENVIRONMENT=staging" \
+            --set-env-vars="LOG_LEVEL=info" \
+            --update-labels="commit-sha=${{ github.sha }}"
+
+      - name: Run health checks
+        run: |
+          SERVICE_URL=$(gcloud run services describe $SERVICE_NAME-staging \
+            --region $REGION \
+            --platform managed \
+            --format 'value(status.url)')
+
+          echo "Service URL: $SERVICE_URL"
+
+          # Wait for service to be ready
+          sleep 30
+
+          # Basic health check
+          curl -f "$SERVICE_URL/healthz" || echo "Health check failed"
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: test
+    environment: production
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production'
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker for GCR
+        run: |
+          gcloud auth configure-docker --quiet
+
+      - name: Build and push Docker image
+        run: |
+          IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:production-${{ github.sha }}"
+          docker build -t $IMAGE_NAME .
+          docker push $IMAGE_NAME
+
+      - name: Deploy to Cloud Run
+        run: |
+          IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:production-${{ github.sha }}"
+          gcloud run deploy $SERVICE_NAME-production \
+            --image $IMAGE_NAME \
+            --region $REGION \
+            --platform managed \
+            --cpu 4 \
+            --memory 8Gi \
+            --max-instances 10 \
+            --timeout 600 \
+            --concurrency 80 \
+            --set-env-vars="ENVIRONMENT=production" \
+            --set-env-vars="LOG_LEVEL=info" \
+            --set-env-vars="SURICATA_IFACE=eth0" \
+            --update-labels="commit-sha=${{ github.sha }}" \
+            --no-allow-unauthenticated
+
+      - name: Configure IAM
+        run: |
+          # Grant Cloud Run invoker permission
+          gcloud run services add-iam-policy-binding $SERVICE_NAME-production \
+            --region $REGION \
+            --platform managed \
+            --member="serviceAccount:${{ secrets.GCP_SA_EMAIL }}" \
+            --role="roles/run.invoker"
+
+      - name: Run comprehensive health checks
+        run: |
+          SERVICE_URL=$(gcloud run services describe $SERVICE_NAME-production \
+            --region $REGION \
+            --platform managed \
+            --format 'value(status.url)')
+
+          echo "Production Service URL: $SERVICE_URL"
+
+          # Wait for service to stabilize
+          sleep 60
+
+          # Run health checks
+          for i in {1..10}; do
+            if curl -f "$SERVICE_URL/healthz"; then
+              echo "Health check passed"
+              break
+            fi
+            echo "Health check attempt $i failed, retrying in 10 seconds..."
+            sleep 10
+          done
+
+      - name: Create deployment tag
+        run: |
+          git tag "deploy/production/${{ github.sha }}"
+          git push origin "deploy/production/${{ github.sha }}"

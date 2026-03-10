@@ -1,0 +1,132 @@
+#!/usr/sbin/nft -f
+# MI-SOAR-NGFW nftables firewall configuration
+# Integrated with Suricata for IPS functionality
+
+flush ruleset
+
+# Define variables
+define WAN_IF = "eth0"
+define LAN_IF = "eth1"
+define WG_IF = "wg0"
+define SURICATA_NFQUEUE = 2
+
+# Define tables
+table inet filter {
+    # Flowtable for hardware offloading (optional)
+    flowtable f {
+        hook ingress priority 0
+        devices = { $WAN_IF, $LAN_IF }
+    }
+
+    # Set definitions
+    set allowed_tcp_ports {
+        type inet_service
+        elements = {
+            ssh,     # SSH
+            http,    # HTTP
+            https,   # HTTPS
+            51820,   # WireGuard
+            55000,   # Wazuh API
+            1514,    # Wazuh syslog
+            1515,    # Wazuh secure syslog
+            5678,    # n8n
+            8080,    # Traefik dashboard
+        }
+    }
+
+    set allowed_udp_ports {
+        type inet_service
+        elements = {
+            51820,   # WireGuard
+            53,      # DNS
+            514,     # Syslog UDP
+        }
+    }
+
+    # Base chains
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        # Connection tracking
+        ct state { established, related } accept
+        ct state invalid drop
+
+        # Loopback interface
+        iif lo accept
+
+        # ICMP (ping)
+        ip protocol icmp accept
+        ip6 nexthdr ipv6-icmp accept
+
+        # Allow Suricata NFQUEUE feedback
+        meta l4proto tcp queue num $SURICATA_NFQUEUE bypass
+
+        # Allow services on specific ports
+        tcp dport @allowed_tcp_ports accept
+        udp dport @allowed_udp_ports accept
+
+        # Log dropped packets
+        log prefix "nftables-input-drop: " group 0
+        counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+
+        # Connection tracking
+        ct state { established, related } accept
+        ct state invalid drop
+
+        # WireGuard traffic forwarding
+        iif $WG_IF oif $WAN_IF accept
+        iif $WAN_IF oif $WG_IF ct state { established, related } accept
+
+        # Suricata inspection
+        meta l4proto tcp queue num $SURICATA_NFQUEUE bypass
+        meta l4proto udp queue num $SURICATA_NFQUEUE bypass
+
+        # Log dropped packets
+        log prefix "nftables-forward-drop: " group 0
+        counter drop
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+
+        # Connection tracking
+        ct state { established, related } accept
+        ct state invalid drop
+    }
+
+    # Chain for Suricata to add dynamic rules
+    chain suricata-drop {
+        type filter hook input priority filter - 10; policy accept;
+
+        # This chain will be populated by Suricata via nftables API
+        # when alerts are triggered in IPS mode
+        counter comment "Dynamic drop rules from Suricata"
+    }
+}
+
+table ip nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+
+        # Port forwarding examples
+        # Redirect HTTP to internal Traefik
+        # iif $WAN_IF tcp dport 80 dnat to 10.10.0.30:80
+    }
+
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+
+        # MASQUERADE for WireGuard clients
+        oif $WAN_IF masquerade
+
+        # MASQUERADE for Docker containers
+        oif $WAN_IF ip saddr 10.10.0.0/24 masquerade
+    }
+}
+
+# Enable logging
+include "/etc/nftables/logging.nft"

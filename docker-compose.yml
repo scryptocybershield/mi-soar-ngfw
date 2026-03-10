@@ -1,0 +1,251 @@
+# MI-SOAR-NGFW Docker Compose
+# Multi-container security platform with SOAR capabilities
+
+version: '3.8'
+
+x-common-volumes: &common-volumes
+  - ./storage/logs:/var/log/mi-soar-ngfw
+  - ./configs:/etc/mi-soar-ngfw/configs:ro
+
+x-common-environment: &common-environment
+  TZ: UTC
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Security: run as non-root user
+  USER_ID: 1000
+  GROUP_ID: 1000
+
+networks:
+  mi-soar-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${DOCKER_SUBNET:-10.10.0.0/24}
+  # Host network for Suricata and WireGuard (requires NET_ADMIN)
+  host:
+    external: true
+    name: host
+
+services:
+  # Suricata IDS/IPS - requires host network and NET_RAW capability
+  suricata:
+    image: jasonish/suricata:${SURICATA_VERSION:-latest}
+    container_name: mi-soar-suricata
+    hostname: suricata
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+      - SYS_NICE
+    volumes:
+      - ./configs/suricata:/etc/suricata:ro
+      - ./storage/logs/suricata:/var/log/suricata
+      - ./storage/rules:/var/lib/suricata/rules:ro
+    environment:
+      <<: *common-environment
+      SURICATA_IFACE: ${SURICATA_IFACE:-eth0}
+    command: >
+      -c /etc/suricata/suricata.yaml
+      -i ${SURICATA_IFACE:-eth0}
+      --init-errors-fatal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Health check: verify Suricata is running
+    healthcheck:
+      test: ["CMD", "suricatasc", "-c", "version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # WireGuard VPN - requires host network and NET_ADMIN capability
+  wireguard:
+    image: linuxserver/wireguard:${WG_VERSION:-latest}
+    container_name: mi-soar-wireguard
+    hostname: wireguard
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ./configs/wireguard:/config
+      - /lib/modules:/lib/modules:ro
+    environment:
+      <<: *common-environment
+      PUID: 1000
+      PGID: 1000
+      PEERS: ${WG_PEERS:-10}
+      PEERDNS: auto
+      INTERNAL_SUBNET: ${WG_SERVER_ADDRESS:-10.10.1.1/24}
+      ALLOWEDIPS: ${WG_ALLOWED_IPS:-0.0.0.0/0}
+    ports:
+      - "${WG_SERVER_PORT:-51820}:51820/udp"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wg", "show"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # nftables firewall - integrates with Suricata
+  nftables:
+    image: debian:bookworm-slim
+    container_name: mi-soar-nftables
+    hostname: nftables
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./configs/nftables:/etc/nftables:ro
+      - ./storage/logs/nftables:/var/log/nftables
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      nft --check -f /etc/nftables/main.nft &&
+      nft -f /etc/nftables/main.nft &&
+      echo 'nftables rules loaded' &&
+      tail -f /dev/null
+      "
+    depends_on:
+      suricata:
+        condition: service_healthy
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Wazuh SIEM (single-node with manager, indexer, dashboard)
+  wazuh:
+    image: wazuh/wazuh:${WAZUH_VERSION:-4.7.3}
+    container_name: mi-soar-wazuh
+    hostname: wazuh
+    restart: unless-stopped
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.10
+    volumes:
+      - ./configs/wazuh:/var/ossec/etc:ro
+      - ./storage/wazuh/data:/var/ossec/data
+      - ./storage/wazuh/logs:/var/ossec/logs
+      - ./storage/wazuh/queue:/var/ossec/queue
+    environment:
+      <<: *common-environment
+      WAZUH_API_USER: ${WAZUH_API_USER:-wazuh}
+      WAZUH_API_PASSWORD: ${WAZUH_API_PASSWORD:-changeme}
+    ports:
+      - "55000:55000"  # Agent registration
+      - "1514:1514"    # Syslog
+      - "1515:1515"    # Secure syslog
+      - "514:514/udp"  # Syslog UDP
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:55000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # n8n SOAR (workflow automation)
+  n8n:
+    image: n8nio/n8n:${N8N_VERSION:-latest}
+    container_name: mi-soar-n8n
+    hostname: n8n
+    restart: unless-stopped
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.20
+    volumes:
+      - ./configs/n8n:/home/node/.n8n
+      - ./storage/n8n/data:/home/node/.n8n/data
+      - ./storage/n8n/logs:/home/node/.n8n/logs
+    environment:
+      <<: *common-environment
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: ${N8N_PORT:-5678}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-changeme}
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL}
+      N8N_METRICS: "true"
+      N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN: "true"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "168"
+    ports:
+      - "5678:5678"
+    depends_on:
+      wazuh:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Traefik reverse proxy with SSL termination
+  traefik:
+    image: traefik:${TRAEFIK_VERSION:-3.0}
+    container_name: mi-soar-traefik
+    hostname: traefik
+    restart: unless-stopped
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.30
+    command:
+      - "--api.dashboard=true"
+      - "--api.insecure=${TRAEFIK_API_INSECURE:-true}"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--log.level=${LOG_LEVEL:-info}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./configs/traefik:/etc/traefik:ro
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"  # Dashboard
+    depends_on:
+      - n8n
+      - wazuh
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Volumes for persistent data (optional - using host mounts)
+volumes:
+  wazuh-data:
+    driver: local
+  n8n-data:
+    driver: local
+  suricata-rules:
+    driver: local

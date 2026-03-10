@@ -1,0 +1,22 @@
+#!/usr/sbin/nft -f
+# Local development nftables rules (less restrictive)
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority filter; policy accept;
+
+        # Basic protection
+        ct state invalid drop
+        tcp flags syn tcp dport 22 limit rate 5/minute accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy accept;
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}

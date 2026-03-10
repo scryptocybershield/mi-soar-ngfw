@@ -1,0 +1,35 @@
+# MI-SOAR-NGFW Suricata Rules
+# Basic detection rules for testing and common threats
+
+# Alert on any TCP traffic on port 4444 (common backdoor port)
+alert tcp any any -> any 4444 (msg:"Potential backdoor activity on port 4444"; sid:1000001; rev:1;)
+
+# Alert on any ICMP traffic (can be tuned for specific environments)
+alert icmp any any -> any any (msg:"ICMP traffic detected"; sid:1000002; rev:1;)
+
+# Alert on SQL injection attempts
+alert tcp any any -> any any (msg:"SQL injection attempt"; content:"' OR '1'='1"; nocase; sid:1000003; rev:1;)
+
+# Alert on XSS attempts
+alert tcp any any -> any any (msg:"XSS attempt"; content:"<script>"; nocase; sid:1000004; rev:1;)
+
+# Alert on directory traversal attempts
+alert tcp any any -> any any (msg:"Directory traversal attempt"; content:"../"; sid:1000005; rev:1;)
+
+# Alert on SSH brute force attempts (threshold)
+alert tcp any any -> any 22 (msg:"SSH brute force attempt"; threshold: type threshold, track by_src, count 5, seconds 60; sid:1000006; rev:1;)
+
+# Alert on HTTP request to admin panels
+alert tcp any any -> any any (msg:"Admin panel access attempt"; content:"/admin"; http_uri; nocase; sid:1000007; rev:1;)
+
+# Alert on malware command and control (example domain)
+alert tcp any any -> any any (msg:"Known C2 domain communication"; content:"evil.com"; http_host; nocase; sid:1000008; rev:1;)
+
+# Alert on cryptocurrency mining traffic
+alert tcp any any -> any any (msg:"Cryptocurrency mining pool traffic"; content:"stratum+tcp"; nocase; sid:1000009; rev:1;)
+
+# Alert on port scanning behavior
+alert tcp any any -> any any (msg:"Port scan detected"; flags:S; threshold: type threshold, track by_dst, count 10, seconds 10; sid:1000010; rev:1;)
+
+# Drop rule for testing IPS mode (requires NFQ or NFLOG)
+#drop tcp any any -> any any (msg:"Test drop rule"; sid:1000011; rev:1;)

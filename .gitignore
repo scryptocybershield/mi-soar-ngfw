@@ -1,0 +1,6 @@
+.env
+*.key
+*.psk
+letsencrypt/
+var/log/
+configs/wireguard/private.key
