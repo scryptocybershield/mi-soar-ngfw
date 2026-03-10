@@ -53,7 +53,7 @@ jobs:
 
       - name: Build Docker image
         run: |
-          docker build -t $SERVICE_NAME:test .
+          docker build -f Dockerfile.cloudrun -t $SERVICE_NAME:test .
 
       - name: Validate Docker Compose
         run: |
@@ -147,7 +147,7 @@ jobs:
       - name: Build and push Docker image
         run: |
           IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:staging-${{ github.sha }}"
-          docker build -t $IMAGE_NAME .
+          docker build -f Dockerfile.cloudrun -t $IMAGE_NAME .
           docker push $IMAGE_NAME
 
       - name: Deploy to Cloud Run
@@ -259,7 +259,7 @@ jobs:
       - name: Build and push Docker image
         run: |
           IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:production-${{ github.sha }}"
-          docker build -t $IMAGE_NAME .
+          docker build -f Dockerfile.cloudrun -t $IMAGE_NAME .
           docker push $IMAGE_NAME
 
       - name: Deploy to Cloud Run
