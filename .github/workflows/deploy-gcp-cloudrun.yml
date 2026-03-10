@@ -25,11 +25,19 @@ on:
         description: 'GCP Project ID'
         required: false
         type: string
+      region:
+        description: 'Cloud Run region'
+        required: false
+        type: string
+      service_name:
+        description: 'Cloud Run service name'
+        required: false
+        type: string
 
 env:
-  PROJECT_ID: ${{ github.event.inputs.project_id || secrets.GCP_PROJECT_ID }}
-  REGION: europe-west1
-  SERVICE_NAME: mi-soar-ngfw
+  PROJECT_ID: ${{ github.event.inputs.project_id || vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+  REGION: ${{ github.event.inputs.region || vars.GCP_REGION || 'europe-west1' }}
+  SERVICE_NAME: ${{ github.event.inputs.service_name || vars.CLOUD_RUN_SERVICE_NAME || 'mi-soar-ngfw' }}
 
 jobs:
   test:
@@ -75,11 +83,41 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Validate deployment configuration
+        run: |
+          if [[ -z "$PROJECT_ID" ]]; then
+            echo "::error::PROJECT_ID is empty. Set workflow input 'project_id', variable 'GCP_PROJECT_ID', or secret 'GCP_PROJECT_ID'."
+            exit 1
+          fi
+          if [[ -z "$REGION" ]]; then
+            echo "::error::REGION is empty. Set workflow input 'region' or variable 'GCP_REGION'."
+            exit 1
+          fi
+          if [[ -z "$SERVICE_NAME" ]]; then
+            echo "::error::SERVICE_NAME is empty. Set workflow input 'service_name' or variable 'CLOUD_RUN_SERVICE_NAME'."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (WIF)
+        if: ${{ secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Authenticate to Google Cloud (Service Account Key)
+        if: ${{ !(secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') && secrets.GCP_SA_KEY != '' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
           project_id: ${{ env.PROJECT_ID }}
+
+      - name: Fail if GCP credentials are missing
+        if: ${{ !((secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') || secrets.GCP_SA_KEY != '') }}
+        run: |
+          echo "::error::No GCP auth credentials found. Configure WIF (GCP_WIF_PROVIDER + GCP_SERVICE_ACCOUNT) or GCP_SA_KEY."
+          exit 1
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
@@ -142,11 +180,41 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Authenticate to Google Cloud
+      - name: Validate deployment configuration
+        run: |
+          if [[ -z "$PROJECT_ID" ]]; then
+            echo "::error::PROJECT_ID is empty. Set workflow input 'project_id', variable 'GCP_PROJECT_ID', or secret 'GCP_PROJECT_ID'."
+            exit 1
+          fi
+          if [[ -z "$REGION" ]]; then
+            echo "::error::REGION is empty. Set workflow input 'region' or variable 'GCP_REGION'."
+            exit 1
+          fi
+          if [[ -z "$SERVICE_NAME" ]]; then
+            echo "::error::SERVICE_NAME is empty. Set workflow input 'service_name' or variable 'CLOUD_RUN_SERVICE_NAME'."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud (WIF)
+        if: ${{ secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Authenticate to Google Cloud (Service Account Key)
+        if: ${{ !(secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') && secrets.GCP_SA_KEY != '' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
           project_id: ${{ env.PROJECT_ID }}
+
+      - name: Fail if GCP credentials are missing
+        if: ${{ !((secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') || secrets.GCP_SA_KEY != '') }}
+        run: |
+          echo "::error::No GCP auth credentials found. Configure WIF (GCP_WIF_PROVIDER + GCP_SERVICE_ACCOUNT) or GCP_SA_KEY."
+          exit 1
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2
