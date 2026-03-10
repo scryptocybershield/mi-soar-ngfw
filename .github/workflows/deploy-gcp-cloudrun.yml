@@ -38,6 +38,7 @@ env:
   PROJECT_ID: ${{ github.event.inputs.project_id || vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
   REGION: ${{ github.event.inputs.region || vars.GCP_REGION || 'europe-west1' }}
   SERVICE_NAME: ${{ github.event.inputs.service_name || vars.CLOUD_RUN_SERVICE_NAME || 'mi-soar-ngfw' }}
+  DEPLOYER_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT || secrets.GCP_SA_EMAIL }}
 
 jobs:
   test:
@@ -98,8 +99,23 @@ jobs:
             exit 1
           fi
 
+      - name: Select authentication method
+        id: auth_method
+        env:
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          if [[ -n "$GCP_WIF_PROVIDER" && -n "$GCP_SERVICE_ACCOUNT" ]]; then
+            echo "method=wif" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$GCP_SA_KEY" ]]; then
+            echo "method=sa_key" >> "$GITHUB_OUTPUT"
+          else
+            echo "method=none" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Authenticate to Google Cloud (WIF)
-        if: ${{ secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
+        if: ${{ steps.auth_method.outputs.method == 'wif' }}
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
@@ -107,14 +123,14 @@ jobs:
           project_id: ${{ env.PROJECT_ID }}
 
       - name: Authenticate to Google Cloud (Service Account Key)
-        if: ${{ !(secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') && secrets.GCP_SA_KEY != '' }}
+        if: ${{ steps.auth_method.outputs.method == 'sa_key' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
           project_id: ${{ env.PROJECT_ID }}
 
       - name: Fail if GCP credentials are missing
-        if: ${{ !((secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') || secrets.GCP_SA_KEY != '') }}
+        if: ${{ steps.auth_method.outputs.method == 'none' }}
         run: |
           echo "::error::No GCP auth credentials found. Configure WIF (GCP_WIF_PROVIDER + GCP_SERVICE_ACCOUNT) or GCP_SA_KEY."
           exit 1
@@ -195,8 +211,23 @@ jobs:
             exit 1
           fi
 
+      - name: Select authentication method
+        id: auth_method
+        env:
+          GCP_WIF_PROVIDER: ${{ secrets.GCP_WIF_PROVIDER }}
+          GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          if [[ -n "$GCP_WIF_PROVIDER" && -n "$GCP_SERVICE_ACCOUNT" ]]; then
+            echo "method=wif" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$GCP_SA_KEY" ]]; then
+            echo "method=sa_key" >> "$GITHUB_OUTPUT"
+          else
+            echo "method=none" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Authenticate to Google Cloud (WIF)
-        if: ${{ secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
+        if: ${{ steps.auth_method.outputs.method == 'wif' }}
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
@@ -204,14 +235,14 @@ jobs:
           project_id: ${{ env.PROJECT_ID }}
 
       - name: Authenticate to Google Cloud (Service Account Key)
-        if: ${{ !(secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') && secrets.GCP_SA_KEY != '' }}
+        if: ${{ steps.auth_method.outputs.method == 'sa_key' }}
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
           project_id: ${{ env.PROJECT_ID }}
 
       - name: Fail if GCP credentials are missing
-        if: ${{ !((secrets.GCP_WIF_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') || secrets.GCP_SA_KEY != '') }}
+        if: ${{ steps.auth_method.outputs.method == 'none' }}
         run: |
           echo "::error::No GCP auth credentials found. Configure WIF (GCP_WIF_PROVIDER + GCP_SERVICE_ACCOUNT) or GCP_SA_KEY."
           exit 1
@@ -251,11 +282,16 @@ jobs:
 
       - name: Configure IAM
         run: |
+          if [[ -z "$DEPLOYER_SERVICE_ACCOUNT" ]]; then
+            echo "::error::Service account for IAM is missing. Set GCP_SERVICE_ACCOUNT (recommended) or GCP_SA_EMAIL."
+            exit 1
+          fi
+
           # Grant Cloud Run invoker permission
           gcloud run services add-iam-policy-binding $SERVICE_NAME-production \
             --region $REGION \
             --platform managed \
-            --member="serviceAccount:${{ secrets.GCP_SA_EMAIL }}" \
+            --member="serviceAccount:$DEPLOYER_SERVICE_ACCOUNT" \
             --role="roles/run.invoker"
 
       - name: Run comprehensive health checks
