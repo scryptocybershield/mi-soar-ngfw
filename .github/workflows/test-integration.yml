@@ -41,7 +41,10 @@ jobs:
           docker run --rm -v $(pwd)/configs/suricata:/etc/suricata:ro jasonish/suricata:latest -T -c /etc/suricata/suricata.yaml || echo "Suricata config test completed"
 
           # Test nftables config
-          docker run --rm -v $(pwd)/configs/nftables:/etc/nftables:ro debian:bookworm-slim nft --check -f /etc/nftables/main.nft || echo "nftables config test completed"
+          docker run --rm -v $(pwd)/configs/nftables:/etc/nftables:ro debian:bookworm-slim sh -c "
+            apt-get update && apt-get install -y nftables &&
+            nft --check -f /etc/nftables/main.nft
+          " || echo "nftables config test completed"
 
       - name: Test Docker Compose configurations
         run: |

@@ -61,7 +61,10 @@ jobs:
           ls -la configs/n8n/
 
           # Validate nftables syntax
-          docker run --rm -v $(pwd)/configs/nftables:/etc/nftables:ro debian:bookworm-slim nft --check -f /etc/nftables/main.nft
+          docker run --rm -v $(pwd)/configs/nftables:/etc/nftables:ro debian:bookworm-slim sh -c "
+            apt-get update && apt-get install -y nftables &&
+            nft --check -f /etc/nftables/main.nft
+          "
 
       - name: Check deployment scripts
         run: |
