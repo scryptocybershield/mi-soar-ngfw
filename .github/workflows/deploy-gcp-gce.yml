@@ -48,7 +48,7 @@ jobs:
 
       - name: Validate Docker Compose files
         run: |
-          docker-compose -f docker-compose.yml -f docker-compose.prod.yml config
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config
 
       - name: Validate configurations
         run: |
@@ -76,7 +76,7 @@ jobs:
     environment: staging
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging')
     permissions:
-      contents: 'read'
+      contents: 'write'
       id-token: 'write'
 
     steps:
@@ -219,7 +219,7 @@ jobs:
     environment: production
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'production'
     permissions:
-      contents: 'read'
+      contents: 'write'
       id-token: 'write'
 
     steps:
@@ -308,15 +308,21 @@ jobs:
           # This is a simplified example - real implementation would be more complex
           PROD_VM_NAME="mi-soar-ngfw-vm-production"
 
-          # Create instance group
-          gcloud compute instance-groups unmanaged create "mi-soar-ngfw-group" \
+          # Create instance group only if it doesn't exist
+          if ! gcloud compute instance-groups unmanaged describe "mi-soar-ngfw-group" \
             --zone "$ZONE" \
-            --project "$PROJECT_ID"
+            --project "$PROJECT_ID" > /dev/null 2>&1; then
+            gcloud compute instance-groups unmanaged create "mi-soar-ngfw-group" \
+              --zone "$ZONE" \
+              --project "$PROJECT_ID"
+          else
+            echo "Instance group mi-soar-ngfw-group already exists"
+          fi
 
           gcloud compute instance-groups unmanaged add-instances "mi-soar-ngfw-group" \
             --zone "$ZONE" \
             --project "$PROJECT_ID" \
-            --instances "$PROD_VM_NAME"
+            --instances "$PROD_VM_NAME" || echo "Instance may already be attached to group"
 
       - name: Run production health checks
         run: |

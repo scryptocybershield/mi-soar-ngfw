@@ -45,9 +45,9 @@ jobs:
 
       - name: Test Docker Compose configurations
         run: |
-          docker-compose -f docker-compose.yml config
-          docker-compose -f docker-compose.yml -f docker-compose.local.yml config
-          docker-compose -f docker-compose.yml -f docker-compose.prod.yml config
+          docker compose -f docker-compose.yml config
+          docker compose -f docker-compose.yml -f docker-compose.local.yml config
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config
 
   integration-test:
     name: Integration Test
@@ -74,7 +74,7 @@ jobs:
       - name: Start test environment
         run: |
           # Start a minimal set of services for testing
-          docker-compose -f docker-compose.yml up -d suricata wireguard nftables
+          docker compose -f docker-compose.yml up -d suricata wireguard nftables
 
           # Wait for services to start
           sleep 30
@@ -122,7 +122,7 @@ jobs:
       - name: Clean up
         if: always()
         run: |
-          docker-compose -f docker-compose.yml down -v
+          docker compose -f docker-compose.yml down -v
           docker system prune -f
 
   security-scan:
@@ -158,8 +158,8 @@ jobs:
         uses: trufflesecurity/trufflehog@main
         with:
           path: ./
-          base: ${{ github.event.before }}
-          head: ${{ github.event.after }}
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          head: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           extra_args: --json
 
       - name: Docker image security scan
@@ -179,7 +179,7 @@ jobs:
       - name: Start services for performance testing
         run: |
           # Start services with resource limits
-          docker-compose -f docker-compose.yml up -d suricata
+          docker compose -f docker-compose.yml up -d suricata
 
           # Wait for startup
           sleep 30
@@ -196,7 +196,7 @@ jobs:
       - name: Clean up
         if: always()
         run: |
-          docker-compose -f docker-compose.yml down -v
+          docker compose -f docker-compose.yml down -v
 
   documentation-check:
     name: Documentation Check
