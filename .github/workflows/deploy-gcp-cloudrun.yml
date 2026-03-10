@@ -35,9 +35,9 @@ on:
         type: string
 
 env:
-  PROJECT_ID: ${{ github.event.inputs.project_id || vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
-  REGION: ${{ github.event.inputs.region || vars.GCP_REGION || 'europe-west1' }}
-  SERVICE_NAME: ${{ github.event.inputs.service_name || vars.CLOUD_RUN_SERVICE_NAME || 'mi-soar-ngfw' }}
+  PROJECT_ID: ${{ github.event.inputs.project_id || vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID || 'calcium-task-479417-u6' }}
+  REGION: ${{ github.event.inputs.region || vars.GCP_REGION || 'europe-southwest1' }}
+  SERVICE_NAME: ${{ github.event.inputs.service_name || vars.CLOUD_RUN_SERVICE_NAME || 'soar-ngfw' }}
   DEPLOYER_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT || secrets.GCP_SA_EMAIL }}
 
 jobs:
@@ -155,6 +155,7 @@ jobs:
           IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:staging-${{ github.sha }}"
           gcloud run deploy $SERVICE_NAME-staging \
             --image $IMAGE_NAME \
+            --project $PROJECT_ID \
             --region $REGION \
             --platform managed \
             --allow-unauthenticated \
@@ -170,6 +171,7 @@ jobs:
       - name: Run health checks
         run: |
           SERVICE_URL=$(gcloud run services describe $SERVICE_NAME-staging \
+            --project $PROJECT_ID \
             --region $REGION \
             --platform managed \
             --format 'value(status.url)')
@@ -267,6 +269,7 @@ jobs:
           IMAGE_NAME="gcr.io/$PROJECT_ID/$SERVICE_NAME:production-${{ github.sha }}"
           gcloud run deploy $SERVICE_NAME-production \
             --image $IMAGE_NAME \
+            --project $PROJECT_ID \
             --region $REGION \
             --platform managed \
             --cpu 4 \
@@ -289,6 +292,7 @@ jobs:
 
           # Grant Cloud Run invoker permission
           gcloud run services add-iam-policy-binding $SERVICE_NAME-production \
+            --project $PROJECT_ID \
             --region $REGION \
             --platform managed \
             --member="serviceAccount:$DEPLOYER_SERVICE_ACCOUNT" \
@@ -297,6 +301,7 @@ jobs:
       - name: Run comprehensive health checks
         run: |
           SERVICE_URL=$(gcloud run services describe $SERVICE_NAME-production \
+            --project $PROJECT_ID \
             --region $REGION \
             --platform managed \
             --format 'value(status.url)')
