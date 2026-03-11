@@ -1,18 +1,20 @@
 # MI-SOAR-NGFW Local Development Overrides
 # For VirtualBox/local development environment
 
-version: '3.8'
-
 services:
   # Suricata - use bridge network for local testing
   suricata:
     network_mode: bridge
     environment:
       SURICATA_IFACE: eth0
+    entrypoint: ["/bin/bash", "-c"]
+    command: >
+      "
+      echo 'Running Suricata in local mock mode' &&
+      tail -f /dev/null
+      "
     volumes:
-      - ./configs/suricata:/etc/suricata:ro
       - ./storage/logs/suricata:/var/log/suricata
-      - ./storage/rules:/var/lib/suricata/rules:ro
     # Disable health check in local (suricatasc may not be available)
     healthcheck:
       disable: true
@@ -32,12 +34,17 @@ services:
   # nftables - simplified rules for local
   nftables:
     network_mode: bridge
+    depends_on:
+      suricata:
+        condition: service_started
     volumes:
       - ./configs/nftables/local.nft:/etc/nftables/main.nft:ro
     entrypoint: ["/bin/bash", "-c"]
     command: >
       "
       echo 'Loading local nftables rules' &&
+      apt-get update &&
+      apt-get install -y --no-install-recommends nftables &&
       nft --check -f /etc/nftables/main.nft &&
       nft -f /etc/nftables/main.nft &&
       echo 'Local nftables rules loaded' &&
@@ -52,15 +59,50 @@ services:
     environment:
       WAZUH_API_USER: admin
       WAZUH_API_PASSWORD: admin
+    volumes: []
     ports:
       - "55000:55000"
       - "1514:1514"
+    healthcheck:
+      disable: true
     # Reduce memory usage
     mem_limit: 2g
     mem_reservation: 1g
 
+  # Wazuh Indexer - local-friendly memory limits
+  wazuh-indexer:
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.11
+        aliases:
+          - wazuh.indexer
+    environment:
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    mem_limit: 2g
+    mem_reservation: 1g
+
+  # Wazuh Dashboard - exposed in local at :5601
+  wazuh-dashboard:
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.12
+    depends_on:
+      wazuh-indexer:
+        condition: service_started
+      wazuh:
+        condition: service_started
+    ports:
+      - "5601:5601"
+    healthcheck:
+      disable: true
+
   # n8n - development settings
   n8n:
+    depends_on:
+      wazuh:
+        condition: service_started
+    healthcheck:
+      disable: true
     networks:
       mi-soar-network:
         ipv4_address: 10.10.0.20
@@ -71,7 +113,7 @@ services:
       N8N_WEBHOOK_URL: http://localhost:5678
       N8N_ENCRYPTION_KEY: development-key-change-in-production
     ports:
-      - "5678:5678"
+      - "${N8N_PORT:-5678}:5678"
     volumes:
       - ./configs/n8n:/home/node/.n8n
       - ./storage/n8n/data:/home/node/.n8n/data
@@ -84,16 +126,46 @@ services:
         ipv4_address: 10.10.0.30
     command:
       - "--api.dashboard=true"
-      - "--api.insecure=true"
+      - "--api.insecure=${TRAEFIK_API_INSECURE:-false}"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--entrypoints.traefik.address=:8080"
+      - "--certificatesresolvers.${TRAEFIK_CERTRESOLVER:-letsencrypt}.acme.tlschallenge=true"
+      - "--certificatesresolvers.${TRAEFIK_CERTRESOLVER:-letsencrypt}.acme.email=${TRAEFIK_ACME_EMAIL:-admin@example.com}"
+      - "--certificatesresolvers.${TRAEFIK_CERTRESOLVER:-letsencrypt}.acme.storage=/letsencrypt/acme.json"
       - "--log.level=DEBUG"
     ports:
-      - "80:80"
-      - "8080:8080"
+      - "${TRAEFIK_WEB_PORT:-80}:80"
+      - "${TRAEFIK_WEBSECURE_PORT:-443}:443"
+      - "${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./configs/traefik/traefik.local.yml:/etc/traefik/traefik.yml:ro
+      - traefik-acme:/letsencrypt
+
+  # Mock firewall API for local development and SOAR workflow testing
+  mock-firewall:
+    build:
+      context: ./mock_firewall
+      dockerfile: Dockerfile
+    container_name: mi-soar-mock-firewall
+    restart: unless-stopped
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.40
+    environment:
+      LOG_LEVEL: info
+      FIREWALL_DASHBOARD_TOKEN: ${FIREWALL_DASHBOARD_TOKEN:-}
+    ports:
+      - "${MOCK_FIREWALL_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 
 # Local network configuration
 networks:

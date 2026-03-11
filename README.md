@@ -12,6 +12,7 @@ MI-SOAR-NGFW is a multi-container platform built with Docker Compose, featuring:
 
 - **Suricata**: IDS/IPS with real-time threat detection
 - **WireGuard**: Secure VPN with automated peer management
+- **OPNsense + OpenVPN (preferred lab path)**: real gateway enforcement with VPN tunnelled endpoints
 - **nftables**: Modern firewall with dynamic rule management
 - **Wazuh**: SIEM with centralized logging and alerting
 - **n8n**: SOAR workflow automation with custom security nodes
@@ -22,6 +23,13 @@ MI-SOAR-NGFW is a multi-container platform built with Docker Compose, featuring:
 - **Cloud Run**: Serverless container deployment on GCP
 - **Compute Engine**: VM-based deployment on GCP
 - **OVH**: Compatible with OVH cloud infrastructure
+
+### Preferred SOAR Lab Path
+- Use OPNsense as enforcement gateway and OpenVPN for endpoint tunnel ingress.
+- Keep n8n as orchestration engine and Wazuh as detection/correlation.
+- Keep `mock-firewall` for local mock mode and CI smoke tests.
+- Blueprint: [opnsense-openvpn-lab.md](/home/s4lva/mi-soar-ngfw/docs/opnsense-openvpn-lab.md)
+- Migration runbook: [opnsense-migration-runbook.md](/home/s4lva/mi-soar-ngfw/docs/opnsense-migration-runbook.md)
 
 ## Quick Start
 
@@ -58,7 +66,130 @@ docker-compose -f docker-compose.yml -f docker-compose.local.yml up -d
 5. Access services:
 - **Traefik Dashboard**: http://localhost:8080
 - **n8n**: http://localhost:5678
-- **Wazuh Dashboard**: http://localhost:5601 (if enabled)
+- **Wazuh Dashboard**: https://localhost:5601
+- **Mock Firewall API**: http://localhost:${MOCK_FIREWALL_PORT:-8081}
+- **Firewall Dashboard**: http://localhost:${MOCK_FIREWALL_PORT:-8081}/dashboard
+- **OPNsense Web UI (official, VM/appliance)**: https://<OPNSENSE_IP>/
+
+6. Initialize Wazuh Indexer security (first start):
+```bash
+bash scripts/wazuh/init_indexer_security.sh
+```
+
+### Enable Wazuh -> n8n Webhook
+
+After `docker compose up`, enable the Wazuh custom integration that forwards alerts to n8n:
+
+```bash
+bash scripts/wazuh/enable_n8n_webhook.sh
+```
+
+Optional environment overrides:
+
+```bash
+WAZUH_CONTAINER=mi-soar-wazuh \
+WAZUH_N8N_HOOK_URL=http://n8n:5678/webhook/wazuh-alert \
+WAZUH_N8N_MIN_LEVEL=5 \
+bash scripts/wazuh/enable_n8n_webhook.sh
+```
+
+### Local Mock-First Deployment (Recommended)
+
+Use this profile first to validate SOAR flows with mock data before enabling real firewall actions:
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d mock-firewall
+curl -fsS http://localhost:${MOCK_FIREWALL_PORT:-8081}/healthz
+```
+
+Or with one-command targets:
+
+```bash
+make mock-up
+make mock-health
+make mock-test
+```
+
+Example flow:
+
+```bash
+curl -fsS -X POST http://localhost:${MOCK_FIREWALL_PORT:-8081}/block-ip \
+  -H 'Content-Type: application/json' \
+  -d '{"ip_address":"192.168.1.100","reason":"Brute force activity detected","duration_minutes":60,"vendor":"fortinet","created_by":"local-test"}'
+
+curl -fsS http://localhost:${MOCK_FIREWALL_PORT:-8081}/blocked-ips
+curl -fsS -X DELETE http://localhost:${MOCK_FIREWALL_PORT:-8081}/block-ip/192.168.1.100
+```
+
+Dashboard (rule management):
+```bash
+open http://localhost:${MOCK_FIREWALL_PORT:-8081}/dashboard
+```
+
+Use official OPNsense as external gateway/appliance (not a Docker container).
+Set n8n integration vars to your OPNsense API endpoint and credentials:
+```bash
+OPNSENSE_BASE_URL=https://<OPNSENSE_IP>
+OPNSENSE_API_KEY=...
+OPNSENSE_API_SECRET=...
+```
+
+### Phase 1: Telegram ChatOps (Polling, Anti-dup)
+
+This workflow avoids public Telegram webhooks (uses polling) and is suitable for local labs and VPS without public DNS.
+
+1. Import workflow file in n8n:
+```text
+configs/n8n/workflows/telegram_chatops_firewall_commands_v1.json
+```
+
+2. Make sure these env vars are set for `n8n`:
+```bash
+TELEGRAM_BOT_TOKEN=...
+FIREWALL_API_URL=http://mock-firewall:8080
+TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
+```
+
+3. Activate the workflow (`telegram-chatops-firewall-commands-v2`) and keep only one Telegram polling workflow active to avoid duplicated responses.
+
+Supported Telegram commands:
+- `/help`
+- `/status`
+- `/list`
+- `/rules`
+- `/block <ip> [minutes]`
+- `/unblock <ip>`
+- `/applyrule <rule_id>`
+- `/flush` (clear pending queue + dedup state)
+- `/resetcursor` (reset per-chat cursor)
+
+Examples:
+```text
+/block 203.0.113.10 120
+/unblock 203.0.113.10
+/rules
+/applyrule rule-abc123
+/status
+/flush
+```
+
+### Realtime Chatbot Mode (No Cron)
+
+For immediate responses (chatbot style), use:
+```text
+configs/n8n/workflows/telegram_chatops_firewall_realtime_v1.json
+```
+
+Requirements:
+- Public HTTPS URL reachable by Telegram for n8n webhooks.
+- Correct `N8N_WEBHOOK_URL` in `.env` (real domain, not placeholder).
+- Telegram credentials assigned in `Telegram Trigger` and `Send Telegram Reply`.
+
+Important:
+- Keep only one Telegram mode active at once:
+  - Realtime webhook workflow, or
+  - Polling workflow.
 
 ### GCP Cloud Run Deployment
 
@@ -110,9 +241,16 @@ Key environment variables (see `.env.example` for complete list):
 | `SURICATA_IFACE` | Network interface for Suricata | `eth0` |
 | `WG_SERVER_PORT` | WireGuard UDP port | `51820` |
 | `WG_PEERS` | Number of WireGuard peers | `10` |
+| `OPNSENSE_BASE_URL` | OPNsense API base URL | `https://opnsense.local` |
+| `OPNSENSE_API_KEY` | OPNsense API key for automation | empty |
+| `OPNSENSE_API_SECRET` | OPNsense API secret for automation | empty |
+| `OPENVPN_ENABLED` | Enable OPNsense OpenVPN-oriented lab mode | `true` |
 | `WAZUH_API_USER` | Wazuh API username | `wazuh` |
-| `WAZUH_API_PASSWORD` | Wazuh API password | `changeme` |
-| `N8N_ENCRYPTION_KEY` | n8n encryption key | `changeme` |
+| `WAZUH_API_PASSWORD` | Wazuh API password | `change-this-wazuh-password` |
+| `N8N_ENCRYPTION_KEY` | n8n encryption key | `change-this-n8n-encryption-key` |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | Allowed Telegram chat IDs for SOAR actions | empty (allow all) |
+| `FIREWALL_API_URL` | Firewall API endpoint for ChatOps commands | `http://mock-firewall:8080` |
+| `FIREWALL_DASHBOARD_TOKEN` | Optional token for `/dashboard` and `/rules` endpoints | empty (disabled) |
 | `LOG_LEVEL` | Application log level | `info` |
 
 ### Service Configuration
@@ -227,6 +365,12 @@ GitHub Actions automatically run:
 - Compatible with OVH cloud infrastructure
 - Similar deployment patterns to GCP
 - Custom networking configuration
+
+### Production (Generic VPS)
+- Install Docker Engine + Docker Compose plugin
+- Configure `.env` with strong credentials
+- Start with `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d`
+- Verify with `./scripts/monitoring/health-checks.sh`
 
 ## Security Considerations
 
