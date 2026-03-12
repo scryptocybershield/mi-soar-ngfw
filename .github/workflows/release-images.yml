@@ -62,12 +62,14 @@ jobs:
           fi
 
       - name: Build local gate image
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         run: |
           set -euo pipefail
           echo "Building local gate image for ${{ matrix.image }}"
           docker build -f "${{ matrix.dockerfile }}" -t "${{ matrix.image }}:gate" "${{ matrix.context }}"
 
       - name: Trivy gate local image
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ matrix.image }}:gate
@@ -76,6 +78,7 @@ jobs:
           severity: ${{ steps.policy.outputs.severity }}
 
       - name: Docker metadata
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -89,6 +92,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
 
       - name: Build and push
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         id: build
         uses: docker/build-push-action@v6
         with:
@@ -101,6 +105,7 @@ jobs:
           provenance: mode=max
 
       - name: Set image references
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         id: refs
         run: |
           set -euo pipefail
@@ -118,9 +123,11 @@ jobs:
           echo "digest_ref=${digest_ref}" >> "$GITHUB_OUTPUT"
 
       - name: Install Cosign
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         uses: sigstore/cosign-installer@v3
 
       - name: Sign published image (keyless)
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         run: |
           set -euo pipefail
           cosign sign --yes --keyless \
@@ -130,6 +137,7 @@ jobs:
             "${{ steps.refs.outputs.digest_ref }}"
 
       - name: Verify signature identity (GitHub OIDC)
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         run: |
           set -euo pipefail
           cosign verify \
@@ -141,6 +149,7 @@ jobs:
             }
 
       - name: Generate SBOM (SPDX JSON)
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         uses: anchore/sbom-action@v0
         with:
           image: ${{ steps.refs.outputs.primary_tag }}
@@ -148,6 +157,7 @@ jobs:
           output-file: sbom-${{ matrix.image }}.spdx.json
 
       - name: Attest SBOM to image digest (keyless)
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         run: |
           set -euo pipefail
           cosign attest --yes --keyless \
@@ -156,6 +166,7 @@ jobs:
             "${{ steps.refs.outputs.digest_ref }}"
 
       - name: Verify SBOM attestation identity
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         run: |
           set -euo pipefail
           cosign verify-attestation \
@@ -168,6 +179,7 @@ jobs:
             }
 
       - name: Write release metadata
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         run: |
           set -euo pipefail
           cat > release-metadata-${{ matrix.image }}.json <<EOF
@@ -184,12 +196,14 @@ jobs:
           EOF
 
       - name: Upload SBOM artifact
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         uses: actions/upload-artifact@v4
         with:
           name: sbom-${{ matrix.image }}
           path: sbom-${{ matrix.image }}.spdx.json
 
       - name: Upload release metadata artifact
+        if: ${{ (matrix.name == 'policy-api' && hashFiles('policy_api/Dockerfile') != '') || (matrix.name == 'edge-agent' && hashFiles('edge_agent/Dockerfile') != '') }}
         uses: actions/upload-artifact@v4
         with:
           name: release-metadata-${{ matrix.image }}
