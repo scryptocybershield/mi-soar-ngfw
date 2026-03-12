@@ -69,16 +69,6 @@ services:
     mem_limit: 2g
     mem_reservation: 1g
 
-  # Wazuh Dashboard - exposed in local at :5601
-  wazuh-dashboard:
-    depends_on:
-      wazuh:
-        condition: service_started
-    ports:
-      - "5601:5601"
-    healthcheck:
-      disable: true
-
   # n8n - development settings
   n8n:
     depends_on:
@@ -180,3 +170,7 @@ networks:
     ipam:
       config:
         - subnet: 10.10.0.0/24
+
+volumes:
+  traefik-acme:
+    driver: local
