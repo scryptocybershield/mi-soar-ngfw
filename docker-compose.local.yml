@@ -69,26 +69,9 @@ services:
     mem_limit: 2g
     mem_reservation: 1g
 
-  # Wazuh Indexer - local-friendly memory limits
-  wazuh-indexer:
-    networks:
-      mi-soar-network:
-        ipv4_address: 10.10.0.11
-        aliases:
-          - wazuh.indexer
-    environment:
-      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
-    mem_limit: 2g
-    mem_reservation: 1g
-
   # Wazuh Dashboard - exposed in local at :5601
   wazuh-dashboard:
-    networks:
-      mi-soar-network:
-        ipv4_address: 10.10.0.12
     depends_on:
-      wazuh-indexer:
-        condition: service_started
       wazuh:
         condition: service_started
     ports:
@@ -160,6 +143,29 @@ services:
       FIREWALL_DASHBOARD_TOKEN: ${FIREWALL_DASHBOARD_TOKEN:-}
     ports:
       - "${MOCK_FIREWALL_PORT:-8081}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Policy API (control-plane action intake for edge-agent enforcement)
+  policy-api:
+    build:
+      context: ./policy_api
+      dockerfile: Dockerfile
+    container_name: mi-soar-policy-api
+    restart: unless-stopped
+    networks:
+      mi-soar-network:
+        ipv4_address: 10.10.0.41
+    environment:
+      DATABASE_URL: sqlite:///./policy.db
+      POLICY_API_N8N_KEY: ${POLICY_API_N8N_KEY:-change-me-n8n}
+      POLICY_API_EDGE_KEY: ${POLICY_API_EDGE_KEY:-change-me-edge}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${POLICY_API_PORT:-8090}:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz', timeout=5)"]
       interval: 30s
