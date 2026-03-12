@@ -1,8 +1,11 @@
 # MI-SOAR-NGFW: Next-Generation Firewall with SOAR Capabilities
 
-[![Integration Tests](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/test-integration.yml/badge.svg)](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/test-integration.yml)
+[![CI](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/ci.yml/badge.svg)](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/ci.yml)
 [![Deploy to GCP Cloud Run](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/deploy-gcp-cloudrun.yml/badge.svg)](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/deploy-gcp-cloudrun.yml)
-[![Security Scan](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/test-integration.yml/badge.svg?branch=main&event=push)](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/test-integration.yml)
+[![Security](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/security.yml/badge.svg)](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/security.yml)
+[![Release Images](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/release-images.yml/badge.svg)](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/release-images.yml)
+[![Promote Images](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/promote-images.yml/badge.svg)](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/promote-images.yml)
+[![Rollback Images](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/rollback-images.yml/badge.svg)](https://github.com/scryptocybershield/mi-soar-ngfw/actions/workflows/rollback-images.yml)
 
 A comprehensive, production-ready Next-Generation Firewall (NGFW) platform integrated with Security Orchestration, Automation, and Response (SOAR) capabilities. Deployable across hybrid environments: local VirtualBox, Google Cloud Platform (GCP), and OVH.
 
@@ -30,6 +33,9 @@ MI-SOAR-NGFW is a multi-container platform built with Docker Compose, featuring:
 - Keep `mock-firewall` for local mock mode and CI smoke tests.
 - Blueprint: [opnsense-openvpn-lab.md](/home/s4lva/mi-soar-ngfw/docs/opnsense-openvpn-lab.md)
 - Migration runbook: [opnsense-migration-runbook.md](/home/s4lva/mi-soar-ngfw/docs/opnsense-migration-runbook.md)
+- SASE-like blueprint (control-plane/edge-plane): [sase-like-cato-blueprint.md](/home/s4lva/mi-soar-ngfw/docs/blueprints/sase-like-cato-blueprint.md)
+- Policy API MVP (Sprint 1): [policy_api/README.md](/home/s4lva/mi-soar-ngfw/policy_api/README.md)
+- Edge Agent MVP (Sprint 2): [edge_agent/README.md](/home/s4lva/mi-soar-ngfw/edge_agent/README.md)
 
 ## Quick Start
 
@@ -149,6 +155,9 @@ configs/n8n/workflows/telegram_chatops_firewall_commands_v1.json
 TELEGRAM_BOT_TOKEN=...
 FIREWALL_API_URL=http://mock-firewall:8080
 TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
+POLICY_API_URL=http://policy-api:8080
+POLICY_API_N8N_KEY=change-me-n8n
+EDGE_NODE_ID=edge-lab-01
 ```
 
 3. Activate the workflow (`telegram-chatops-firewall-commands-v2`) and keep only one Telegram polling workflow active to avoid duplicated responses.
@@ -156,7 +165,8 @@ TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
 Supported Telegram commands:
 - `/help`
 - `/status`
-- `/list`
+- `/status <action_id>` (consulta en `policy-api`)
+- `/list` (bloqueos activos desde `policy-api`)
 - `/rules`
 - `/block <ip> [minutes]`
 - `/unblock <ip>`
@@ -171,8 +181,16 @@ Examples:
 /rules
 /applyrule rule-abc123
 /status
+/status 28ac17be-92ee-4ff7-bd4e-d0ab5fd2e7d0
 /flush
 ```
+
+Note for `/block`, `/unblock` and `/list`:
+- `/block` now creates an **accepted action** in `policy-api` (`POST /actions/block-ip`).
+- `/unblock` now creates an **accepted action** in `policy-api` (`POST /actions/unblock-ip`).
+- `/list` now reads active blocks from control plane (`GET /edge-nodes/{edge_node_id}/blocks`).
+- Actual enforcement is applied later by `edge-agent` polling and updating `nftables`.
+- In local compose, `policy-api` is exposed on `http://localhost:8090/healthz` for verification.
 
 ### Realtime Chatbot Mode (No Cron)
 
@@ -336,10 +354,49 @@ Run comprehensive health checks:
 
 ### Integration Tests
 GitHub Actions automatically run:
-1. Unit tests for configurations
-2. Integration tests with Docker Compose
-3. Security vulnerability scanning
-4. Performance testing
+1. CI validation (Python compile checks, n8n JSON validation, compose validation, smoke builds without push)
+2. Security checks (Bandit, pip-audit, Trivy image scan)
+3. Image release to Docker Hub from `main`/tags with signed images and SBOM artifacts
+4. Controlled image promotion workflow (`dev -> staging -> prod`) using GitHub Environments
+
+### SecDevOps Pipeline and Environments
+- `ci.yml`: validation and smoke builds only (no image push).
+- `security.yml`: Python/code and image security checks with severity gate policy.
+- `release-images.yml`: builds/pushes `mi-soar-policy-api` and `mi-soar-edge-agent`, applies vulnerability gate before push, assigns `dev` + `sha-*` tags on default branch, generates SBOM, signs by digest (cosign keyless), and creates/verifies SBOM attestation.
+- `promote-images.yml`: manual promotion by re-tagging existing published manifests (no rebuild), with `environment` gate and mandatory verify-before-promote (digest resolution, signature identity, SBOM attestation, vulnerability gate).
+- `rollback-images.yml`: manual secure rollback by source tag/digest with mandatory verification before re-tagging.
+- Operational runbook: [docs/pipeline-operational-validation.md](/home/s4lva/mi-soar-ngfw/docs/pipeline-operational-validation.md)
+- Local smoke helper: `scripts/ci/pipeline-ops-smoke.sh`
+
+Required repository setup for environment gates:
+- Create GitHub Environments: `dev`, `staging`, `prod`.
+- Configure required reviewers on `prod` environment to enforce manual approval before production promotion.
+
+Required Docker Hub secrets:
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+
+Severity gate policy:
+- Default: `CRITICAL` blocks release/promote/rollback.
+- Optional stricter mode: set repository variable `SECURITY_GATE_BLOCK_HIGH=true` to block on `HIGH,CRITICAL`.
+
+Image signing notes:
+- Current workflows use keyless signing with OIDC (`cosign sign --yes`) and do not require extra signing secrets.
+- If your organization requires key-based signing, add dedicated secrets (for example `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD`) and adapt the signing step.
+
+Signature identity policy:
+- Release artifacts must verify against `.github/workflows/release-images.yml`.
+- Promote/Rollback accept source signatures from release/promote/rollback workflows and re-sign target tags with their own workflow identity.
+- Verification issuer is fixed to `https://token.actions.githubusercontent.com`.
+
+Attestations:
+- Build provenance is emitted by Docker Buildx (`provenance: mode=max`).
+- SBOM is generated (SPDX JSON), attached as workflow artifact, and attested to the image digest with cosign keyless.
+
+Rollback:
+- Use `rollback-images.yml` (`workflow_dispatch`) with `target_environment` and either `source_tag` or `source_digest`.
+- Before rollback, workflow verifies source existence, signature identity, SBOM attestation, and vulnerability gate.
+- `prod` rollback remains gated by the `prod` GitHub Environment approval policy.
 
 ## Deployment Strategies
 

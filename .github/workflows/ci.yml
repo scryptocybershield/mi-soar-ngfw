@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Syntax and Config
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python compile checks
+        run: |
+          set -euo pipefail
+          targets=(
+            "policy_api/policy_api"
+            "edge_agent/edge_agent"
+            "mock_firewall"
+            "opnsense_adapter"
+          )
+          for d in "${targets[@]}"; do
+            if [ -d "$d" ]; then
+              echo "compileall -> $d"
+              python3 -m compileall "$d"
+            fi
+          done
+
+      - name: Validate n8n workflow JSON
+        run: |
+          set -euo pipefail
+          if [ -d "configs/n8n/workflows" ]; then
+            python3 -c "import json; from pathlib import Path; workflows=sorted(Path('configs/n8n/workflows').glob('*.json')); print('No n8n workflows found, skipping.' if not workflows else f'Found workflows: {len(workflows)}'); [json.load(open(wf, 'r', encoding='utf-8')) for wf in workflows]; [print(f'valid: {wf}') for wf in workflows]"
+          fi
+
+      - name: Validate Docker Compose
+        run: |
+          set -euo pipefail
+          docker compose -f docker-compose.yml config >/dev/null
+          if [ -f docker-compose.local.yml ]; then
+            docker compose -f docker-compose.yml -f docker-compose.local.yml config >/dev/null
+          fi
+          if [ -f docker-compose.prod.yml ]; then
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null
+          fi
+
+  build-smoke:
+    name: Build Smoke (No Push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build policy-api image
+        if: ${{ hashFiles('policy_api/Dockerfile') != '' }}
+        run: docker build -f policy_api/Dockerfile -t mi-soar-policy-api:ci policy_api
+
+      - name: Build edge-agent image
+        if: ${{ hashFiles('edge_agent/Dockerfile') != '' }}
+        run: docker build -f edge_agent/Dockerfile -t mi-soar-edge-agent:ci edge_agent
+
+      - name: Build root image
+        if: ${{ hashFiles('Dockerfile') != '' }}
+        run: docker build -f Dockerfile -t mi-soar-ngfw:ci .
+
+      - name: Build cloudrun image
+        if: ${{ hashFiles('Dockerfile.cloudrun') != '' }}
+        run: docker build -f Dockerfile.cloudrun -t mi-soar-ngfw-cloudrun:ci .
