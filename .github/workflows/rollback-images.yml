@@ -1,0 +1,211 @@
+name: Rollback Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: "Environment tag to rollback"
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+      source_tag:
+        description: "Known source tag to rollback to (example: staging, prod, sha-abc123, v1.2.3). Leave empty if using source_digest."
+        required: false
+        default: ""
+        type: string
+      source_digest:
+        description: "Source digest (sha256:...) as safer explicit rollback target. Leave empty if using source_tag."
+        required: false
+        default: ""
+        type: string
+      sign_images:
+        description: "Sign rollback tag with cosign keyless"
+        required: true
+        default: true
+        type: boolean
+      rollback_latest:
+        description: "Also update latest (recommended only for prod)"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: image-tag-state-${{ github.event.inputs.target_environment || 'unknown' }}
+  cancel-in-progress: false
+
+env:
+  SECURITY_GATE_BLOCK_HIGH: ${{ vars.SECURITY_GATE_BLOCK_HIGH || 'false' }}
+
+jobs:
+  rollback:
+    name: Verify and rollback image tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.target_environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mi-soar-policy-api
+          - image: mi-soar-edge-agent
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          if [ -z "${{ inputs.source_tag }}" ] && [ -z "${{ inputs.source_digest }}" ]; then
+            echo "::error::Provide source_tag or source_digest"
+            exit 1
+          fi
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve gate severity policy
+        id: policy
+        run: |
+          set -euo pipefail
+          if [ "${SECURITY_GATE_BLOCK_HIGH}" = "true" ]; then
+            echo "severity=HIGH,CRITICAL" >> "$GITHUB_OUTPUT"
+            echo "mode=strict" >> "$GITHUB_OUTPUT"
+          else
+            echo "severity=CRITICAL" >> "$GITHUB_OUTPUT"
+            echo "mode=default" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve rollback source digest
+        id: source
+        run: |
+          set -euo pipefail
+          image_repo="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}"
+          if [ -n "${{ inputs.source_digest }}" ]; then
+            digest_ref="${image_repo}@${{ inputs.source_digest }}"
+            docker buildx imagetools inspect "$digest_ref" >/dev/null || {
+              echo "::error::Source digest not found: $digest_ref"
+              exit 1
+            }
+          else
+            source_ref="${image_repo}:${{ inputs.source_tag }}"
+            digest="$(docker buildx imagetools inspect "$source_ref" | sed -n 's/^Digest: //p' | head -n1)"
+            if [ -z "$digest" ]; then
+              echo "::error::Could not resolve digest for source tag: $source_ref"
+              exit 1
+            fi
+            digest_ref="${image_repo}@${digest}"
+          fi
+          target_ref="${image_repo}:${{ inputs.target_environment }}"
+          echo "digest_ref=${digest_ref}" >> "$GITHUB_OUTPUT"
+          echo "target_ref=${target_ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Verify source signature identity (release/promote/rollback)
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/(release-images|promote-images|rollback-images)\\.yml@.*$" \
+            "${{ steps.source.outputs.digest_ref }}" >/dev/null || {
+              echo "::error::Source signature verification failed for ${{ steps.source.outputs.digest_ref }}"
+              exit 1
+            }
+
+      - name: Verify source SBOM attestation identity
+        run: |
+          set -euo pipefail
+          cosign verify-attestation \
+            --type spdxjson \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@.*$" \
+            "${{ steps.source.outputs.digest_ref }}" >/dev/null || {
+              echo "::error::Source SBOM attestation verification failed for ${{ steps.source.outputs.digest_ref }}"
+              exit 1
+            }
+
+      - name: Trivy gate rollback source digest
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.source.outputs.digest_ref }}
+          format: table
+          exit-code: "1"
+          severity: ${{ steps.policy.outputs.severity }}
+
+      - name: Apply rollback by re-tagging remote manifest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${{ steps.source.outputs.target_ref }}" "${{ steps.source.outputs.digest_ref }}"
+          if [ "${{ inputs.rollback_latest }}" = "true" ] && [ "${{ inputs.target_environment }}" = "prod" ]; then
+            latest_ref="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest"
+            docker buildx imagetools create --tag "$latest_ref" "${{ steps.source.outputs.digest_ref }}"
+          fi
+
+      - name: Sign rollback target tag (keyless)
+        if: ${{ inputs.sign_images }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes --keyless \
+            -a repo="${{ github.repository }}" \
+            -a workflow="${{ github.workflow }}" \
+            -a run_id="${{ github.run_id }}" \
+            "${{ steps.source.outputs.target_ref }}"
+
+      - name: Verify rollback signature identity (GitHub OIDC)
+        if: ${{ inputs.sign_images }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/rollback-images.yml@.*$" \
+            "${{ steps.source.outputs.target_ref }}" >/dev/null || {
+              echo "::error::Rollback signature verification failed for ${{ steps.source.outputs.target_ref }}"
+              exit 1
+            }
+
+      - name: Write rollback metadata
+        run: |
+          set -euo pipefail
+          cat > rollback-metadata-${{ matrix.image }}.json <<EOF
+          {
+            "image": "${{ matrix.image }}",
+            "target_environment": "${{ inputs.target_environment }}",
+            "source_tag": "${{ inputs.source_tag }}",
+            "source_digest_ref": "${{ steps.source.outputs.digest_ref }}",
+            "target_ref": "${{ steps.source.outputs.target_ref }}",
+            "gate_mode": "${{ steps.policy.outputs.mode }}",
+            "gate_severity": "${{ steps.policy.outputs.severity }}",
+            "workflow": "${{ github.workflow }}",
+            "run_id": "${{ github.run_id }}"
+          }
+          EOF
+
+      - name: Upload rollback metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rollback-metadata-${{ matrix.image }}
+          path: rollback-metadata-${{ matrix.image }}.json
+
+      - name: Rollback summary
+        if: always()
+        run: |
+          {
+            echo "## Rollback Summary: ${{ matrix.image }}"
+            echo "- Target environment: ${{ inputs.target_environment }}"
+            echo "- Source tag: ${{ inputs.source_tag }}"
+            echo "- Source digest: ${{ steps.source.outputs.digest_ref }}"
+            echo "- Target ref: ${{ steps.source.outputs.target_ref }}"
+            echo "- Gate mode: ${{ steps.policy.outputs.mode }}"
+            echo "- Blocking severities: ${{ steps.policy.outputs.severity }}"
+            echo "- Job result: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

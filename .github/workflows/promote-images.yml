@@ -1,0 +1,213 @@
+name: Promote Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: "Source tag to promote (example: dev, sha-abc123, v1.2.3)"
+        required: true
+        default: "dev"
+        type: string
+      target_environment:
+        description: "Target environment tag"
+        required: true
+        type: choice
+        options:
+          - staging
+          - prod
+      sign_images:
+        description: "Sign promoted tags with cosign keyless"
+        required: true
+        default: true
+        type: boolean
+      promote_latest:
+        description: "Also tag as latest (recommended only for prod)"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: image-tag-state-${{ github.event.inputs.target_environment || 'unknown' }}
+  cancel-in-progress: false
+
+env:
+  SECURITY_GATE_BLOCK_HIGH: ${{ vars.SECURITY_GATE_BLOCK_HIGH || 'false' }}
+
+jobs:
+  promote:
+    name: Verify and Promote image tags
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.target_environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: mi-soar-policy-api
+          - image: mi-soar-edge-agent
+    steps:
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Resolve gate severity policy
+        id: policy
+        run: |
+          set -euo pipefail
+          if [ "${SECURITY_GATE_BLOCK_HIGH}" = "true" ]; then
+            echo "severity=HIGH,CRITICAL" >> "$GITHUB_OUTPUT"
+            echo "mode=strict" >> "$GITHUB_OUTPUT"
+          else
+            echo "severity=CRITICAL" >> "$GITHUB_OUTPUT"
+            echo "mode=default" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve source digest
+        id: source
+        run: |
+          set -euo pipefail
+          source_ref="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ inputs.source_tag }}"
+          digest="$(docker buildx imagetools inspect "$source_ref" | sed -n 's/^Digest: //p' | head -n1)"
+          if [ -z "$digest" ]; then
+            echo "::error::Could not resolve digest for source tag: $source_ref"
+            exit 1
+          fi
+          digest_ref="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}@${digest}"
+          target_ref="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:${{ inputs.target_environment }}"
+          echo "source_ref=${source_ref}" >> "$GITHUB_OUTPUT"
+          echo "digest_ref=${digest_ref}" >> "$GITHUB_OUTPUT"
+          echo "target_ref=${target_ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Verify source signature identity (release/promote/rollback)
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/(release-images|promote-images|rollback-images)\\.yml@.*$" \
+            "${{ steps.source.outputs.digest_ref }}" >/dev/null || {
+              echo "::error::Source signature identity verification failed for ${{ steps.source.outputs.digest_ref }}"
+              exit 1
+            }
+
+      - name: Verify source SBOM attestation identity
+        run: |
+          set -euo pipefail
+          cosign verify-attestation \
+            --type spdxjson \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/release-images.yml@.*$" \
+            "${{ steps.source.outputs.digest_ref }}" >/dev/null || {
+              echo "::error::Source SBOM attestation verification failed for ${{ steps.source.outputs.digest_ref }}"
+              exit 1
+            }
+
+      - name: Trivy gate source image digest
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.source.outputs.digest_ref }}
+          format: table
+          exit-code: "1"
+          severity: ${{ steps.policy.outputs.severity }}
+
+      - name: Promote tag by re-tagging remote manifest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --tag "${{ steps.source.outputs.target_ref }}" "${{ steps.source.outputs.digest_ref }}"
+          if [ "${{ inputs.promote_latest }}" = "true" ] && [ "${{ inputs.target_environment }}" = "prod" ]; then
+            latest_ref="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest"
+            docker buildx imagetools create --tag "$latest_ref" "${{ steps.source.outputs.digest_ref }}"
+          fi
+
+      - name: Sign promoted image tag (keyless)
+        if: ${{ inputs.sign_images }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes --keyless \
+            -a repo="${{ github.repository }}" \
+            -a workflow="${{ github.workflow }}" \
+            -a run_id="${{ github.run_id }}" \
+            "${{ steps.source.outputs.target_ref }}"
+
+      - name: Verify promoted signature identity (GitHub OIDC)
+        if: ${{ inputs.sign_images }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/promote-images.yml@.*$" \
+            "${{ steps.source.outputs.target_ref }}" >/dev/null || {
+              echo "::error::Promoted tag signature verification failed for ${{ steps.source.outputs.target_ref }}"
+              exit 1
+            }
+
+      - name: Sign latest tag (keyless)
+        if: ${{ inputs.sign_images && inputs.promote_latest && inputs.target_environment == 'prod' }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes --keyless \
+            -a repo="${{ github.repository }}" \
+            -a workflow="${{ github.workflow }}" \
+            -a run_id="${{ github.run_id }}" \
+            "docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest"
+
+      - name: Verify latest signature identity (GitHub OIDC)
+        if: ${{ inputs.sign_images && inputs.promote_latest && inputs.target_environment == 'prod' }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/promote-images.yml@.*$" \
+            "docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.image }}:latest" >/dev/null || {
+              echo "::error::Latest tag signature verification failed for ${{ matrix.image }}"
+              exit 1
+            }
+
+      - name: Write promote metadata
+        run: |
+          set -euo pipefail
+          cat > promote-metadata-${{ matrix.image }}.json <<EOF
+          {
+            "image": "${{ matrix.image }}",
+            "source_tag": "${{ inputs.source_tag }}",
+            "target_environment": "${{ inputs.target_environment }}",
+            "source_ref": "${{ steps.source.outputs.source_ref }}",
+            "source_digest_ref": "${{ steps.source.outputs.digest_ref }}",
+            "target_ref": "${{ steps.source.outputs.target_ref }}",
+            "gate_mode": "${{ steps.policy.outputs.mode }}",
+            "gate_severity": "${{ steps.policy.outputs.severity }}",
+            "workflow": "${{ github.workflow }}",
+            "run_id": "${{ github.run_id }}"
+          }
+          EOF
+
+      - name: Upload promote metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: promote-metadata-${{ matrix.image }}
+          path: promote-metadata-${{ matrix.image }}.json
+
+      - name: Promote summary
+        if: always()
+        run: |
+          {
+            echo "## Promote Summary: ${{ matrix.image }}"
+            echo "- Target environment: ${{ inputs.target_environment }}"
+            echo "- Source tag: ${{ inputs.source_tag }}"
+            echo "- Source digest: ${{ steps.source.outputs.digest_ref }}"
+            echo "- Target ref: ${{ steps.source.outputs.target_ref }}"
+            echo "- Gate mode: ${{ steps.policy.outputs.mode }}"
+            echo "- Blocking severities: ${{ steps.policy.outputs.severity }}"
+            echo "- Job result: ${{ job.status }}"
+          } >> "$GITHUB_STEP_SUMMARY"

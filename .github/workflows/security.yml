@@ -1,0 +1,168 @@
+name: Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SECURITY_GATE_BLOCK_HIGH: ${{ vars.SECURITY_GATE_BLOCK_HIGH || 'false' }}
+
+jobs:
+  sast-and-deps:
+    name: SAST and Dependency Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install security tools
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install bandit pip-audit
+
+      - name: Run Bandit
+        run: |
+          set -euo pipefail
+          targets=()
+          [ -d policy_api ] && targets+=("policy_api")
+          [ -d edge_agent ] && targets+=("edge_agent")
+          [ -d mock_firewall ] && targets+=("mock_firewall")
+          [ -d opnsense_adapter ] && targets+=("opnsense_adapter")
+          if [ "${#targets[@]}" -gt 0 ]; then
+            bandit -r "${targets[@]}"
+          else
+            echo "No Python targets found."
+          fi
+
+      - name: Run pip-audit
+        run: |
+          set -euo pipefail
+          reqs=(
+            "policy_api/requirements.txt"
+            "edge_agent/requirements.txt"
+            "mock_firewall/requirements.txt"
+            "opnsense_adapter/requirements.txt"
+          )
+          for r in "${reqs[@]}"; do
+            if [ -f "$r" ]; then
+              echo "pip-audit -> $r"
+              pip-audit -r "$r"
+            fi
+          done
+
+      - name: SAST summary
+        if: always()
+        run: |
+          {
+            echo "## Security: SAST and Dependencies"
+            echo "- Job result: ${{ job.status }}"
+            echo "- Tools: bandit, pip-audit"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  container-scan:
+    name: Container Scan and Gate (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build policy-api image
+        if: ${{ hashFiles('policy_api/Dockerfile') != '' }}
+        run: docker build -f policy_api/Dockerfile -t mi-soar-policy-api:scan policy_api
+
+      - name: Build edge-agent image
+        if: ${{ hashFiles('edge_agent/Dockerfile') != '' }}
+        run: docker build -f edge_agent/Dockerfile -t mi-soar-edge-agent:scan edge_agent
+
+      - name: Resolve gate severity policy
+        id: policy
+        run: |
+          if [ "${SECURITY_GATE_BLOCK_HIGH}" = "true" ]; then
+            echo "severity=HIGH,CRITICAL" >> "$GITHUB_OUTPUT"
+            echo "mode=strict" >> "$GITHUB_OUTPUT"
+          else
+            echo "severity=CRITICAL" >> "$GITHUB_OUTPUT"
+            echo "mode=default" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Trivy gate policy-api image
+        if: ${{ hashFiles('policy_api/Dockerfile') != '' }}
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: mi-soar-policy-api:scan
+          format: table
+          exit-code: "1"
+          severity: ${{ steps.policy.outputs.severity }}
+
+      - name: Trivy gate edge-agent image
+        if: ${{ hashFiles('edge_agent/Dockerfile') != '' }}
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: mi-soar-edge-agent:scan
+          format: table
+          exit-code: "1"
+          severity: ${{ steps.policy.outputs.severity }}
+
+      - name: Trivy SARIF policy-api image
+        if: ${{ always() && hashFiles('policy_api/Dockerfile') != '' }}
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: mi-soar-policy-api:scan
+          format: sarif
+          output: trivy-policy-api.sarif
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+
+      - name: Trivy SARIF edge-agent image
+        if: ${{ always() && hashFiles('edge_agent/Dockerfile') != '' }}
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: mi-soar-edge-agent:scan
+          format: sarif
+          output: trivy-edge-agent.sarif
+          exit-code: "0"
+          severity: HIGH,CRITICAL
+
+      - name: Upload policy-api SARIF
+        if: ${{ always() && github.event_name != 'pull_request' && hashFiles('policy_api/Dockerfile') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-policy-api.sarif
+
+      - name: Upload edge-agent SARIF
+        if: ${{ always() && github.event_name != 'pull_request' && hashFiles('edge_agent/Dockerfile') != '' }}
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-edge-agent.sarif
+
+      - name: Security gate summary
+        if: always()
+        run: |
+          {
+            echo "## Security: Container Gate"
+            echo "- Gate mode: ${{ steps.policy.outputs.mode }}"
+            echo "- Blocking severities: ${{ steps.policy.outputs.severity }}"
+            echo "- Job result: ${{ job.status }}"
+            echo ""
+            echo "If this job failed, release/promote/rollback should be blocked by the same policy in their workflows."
+          } >> "$GITHUB_STEP_SUMMARY"
